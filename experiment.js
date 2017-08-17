@@ -26,18 +26,6 @@ var Experiment = function(id) {
         this.conversions = [0,0];
         this.days = 0;
     }
-    
-    this.get_conversion = function(i) {
-        return this.conversions[i]/this.visits[i];
-    }
-
-    this.get_lift = function(i) {
-        return this.get_conversion(i) - this.get_conversion(0);
-    }
-
-    this.get_relative_lift = function(i) {
-        return this.get_conversion(i) / this.get_conversion(0) - 1;
-    }
 
     this.get_g_test = function() {
         var data_all = [];
@@ -59,23 +47,47 @@ var Experiment = function(id) {
         return round_to_precision( 100 * (1-this.get_p()), 2);
     };
 
-    this.get_confidence_delta = function(i) {
-        var p = this.get_conversion(i);
-        return 1.644854 * Math.sqrt( p * ( 1 - p ) / this.visits[i] );
+    this.get_mean = function(i) {
+    	var p = this.conversions[i]/this.visits[i];
+        var q = 1.644854 * Math.sqrt( p * ( 1 - p ) / this.visits[i] );
+        
+        return [p, [p - q, p + q]];
     }
 
-    this.get_lift_confidence_delta = function(i) {
-        var p = this.get_conversion(i);
+    this.get_absolute_effect = function(i) {
+    	var p = this.get_conversion(i);
         var q = this.get_conversion(0);
-        return 1.644854 * Math.sqrt( (p * ( 1 - p ) / this.visits[i]) + q * ( 1 - q ) / this.visits[0] );
+        var z = 1.644854 * Math.sqrt( (p * ( 1 - p ) / this.visits[i]) + q * ( 1 - q ) / this.visits[0] );
+        
+        return [ p - q, [p - q - z, p - q + z]];
     }
+    
+	this.get_relative_effect = function(i) {
+		var avg_base = this.get_mean(0)[0];
+		var obs_base = this.visits[0];
+		var stdev_base = Math.sqrt(avg_base * ( 1 - avg_base )) / Math.sqrt(obs_base);
 
-    this.get_relative_lift_confidence_delta = function(i) {
-    	// After speaking with Raphael, I now realise this is not correct.
-    	// However, fixing it is non-trivial, so adding a note for later.
-    	// TODO Correctly compute CI around relative lift.
-        return this.get_lift_confidence_delta(i) * this.get_relative_lift(i) / this.get_lift(i);
-    }
+		var avg_var = this.get_mean(i)[0];
+		var obs_var = this.visits[i];
+		var stdev_var = Math.sqrt(avg_var * ( 1 - avg_var )) / Math.sqrt(obs_var);
+
+		var zscore = tdistr(1000000, this.P_VALUE/2);
+		if (isNaN(avg_base) || isNaN(avg_var) || avg_base == 0 || obs_base == 0 || obs_var == 0) return [ NaN, [NaN, NaN]];
+		
+		var estimate = (avg_var - avg_base) / Math.abs(avg_base);
+		if (isNaN(stdev_base) || isNaN(stdev_var) || isNaN(obs_base) || isNaN(obs_var)) return [ estimate, [ NaN, NaN ]];
+
+		var x = avg_base * avg_var;
+		var y = Math.pow(avg_base, 2) - ( Math.pow(zscore, 2) * Math.pow(stdev_base, 2) );
+		var z = Math.pow(avg_var, 2)  - ( Math.pow(zscore, 2) * Math.pow(stdev_var, 2) );
+
+		var q = Math.pow(x, 2) - (y * z);
+		if (q <= 0 || y <= 0) return [ estimate, [NaN, NaN]];
+
+		var range = Math.sqrt(q) / y;
+		var fieller =[ x/y - range - 1, x/y + range - 1 ];
+		return avg_base >= 0 ? [estimate, fieller] : [estimate, fieller.map(function(x){return -x})];
+	}
 };
 
 // This takes an array of arrays of any size, and calculates
@@ -123,40 +135,41 @@ function calculate_g_test (data) {
 
 Vue.component('experiment-table', {
 	template: `
-		<table>
-			<tbody>
-				<tr class="header">
-					<td></td>
-					<td>Users</td>
-					<td>Sales</td>
-					<td>Rate</td>
-					<td>Change</td>
-					<td>Significant</td>
+		<table class="table table-condensed table-striped">
+			<thead>
+				<tr>
+					<th></th>
+					<th>Users</th>
+					<th>Sales</th>
+					<th>Rate</th>
+					<th>Change</th>
+					<th>Significant</th>
 				</tr>
+			</thead>
+			<tbody>
 				<tr v-for="(v,i) in e.variants">
-					<td v-if="i == 0"><b>Base</b></td>
-					<td v-if="i > 0"><b>Variant {{i}}</b></td>
+					<th v-if="i == 0">Base</th>
+					<th v-if="i > 0">Variant {{i}}</th>
 					<td>{{ e.visits[i].toLocaleString() }}</td>
 					<td>{{ e.conversions[i].toLocaleString() }}</td>
-					<td>
-						{{ (e.get_conversion(i)*100).toFixed(2) }}%<br />
-						<span class="muted">\xB1&nbsp;{{ (e.get_confidence_delta(i)*100).toFixed(2) }}</span>
-					</td>
+					<td>{{ (e.get_mean(i)[0]*100).toFixed(2) }}%</td>
+					<td v-if="i == 0" class="text-muted">-</td>
+					<td v-if="i == 0" class="text-muted">-</td>
 					<td v-if="i > 0">
 						<span class="confidence-interval-display">
 							<svg :width="ci_width" height="18">
 								<line :x1="ci_width/2" y1="0" :x2="ci_width/2" y2="18" class="line"></line>
-								<rect x="-2" :width="ci_width/2" y="0" height="18" rx="0" ry="0" :class="{bg:1, bg_less:1, bg_significant_ugly:(e.is_significant() && e.get_relative_lift(i) < 0)}"></rect>
-								<rect :x="ci_width/2+2" :width="ci_width/2" y="0" height="18" rx="0" ry="0" :class="{bg:1, bg_more:1, bg_significant_ugly:(e.is_significant() && e.get_relative_lift(i) > 0)}"></rect>
+								<rect x="-2" :width="ci_width/2" y="0" height="18" rx="0" ry="0" :class="{bg:1, bg_less:1, bg_significant_ugly:(e.is_significant() && e.get_relative_effect(i)[0] < 0)}"></rect>
+								<rect :x="ci_width/2+2" :width="ci_width/2" y="0" height="18" rx="0" ry="0" :class="{bg:1, bg_more:1, bg_significant_ugly:(e.is_significant() && e.get_relative_effect(i)[0] > 0)}"></rect>
 								<rect v-if="can_do_ci(i)" :x="transpose(ci_scale(i), ci(i)[0])" :width="transpose(ci_scale(i), ci(i)[1])-transpose(ci_scale(i), ci(i)[0])" y="3" height="12" rx="2" ry="2" :class="{ ci_svg:1, ci_significant_ugly:e.is_significant(),ci_inconclusive:!e.is_significant() }"></rect>
-								<line v-if="can_do_mle(i)" :x1="transpose(ci_scale(i), e.get_relative_lift(i))" y1="3" :x2="transpose(ci_scale(i), e.get_relative_lift(i))" y2="15" class="est"></line>
+								<line v-if="can_do_mle(i)" :x1="transpose(ci_scale(i), e.get_relative_effect(i)[0])" y1="3" :x2="transpose(ci_scale(i), e.get_relative_effect(i)[0])" y2="15" class="est"></line>
 							</svg>
-							<div>{{ (e.get_relative_lift(i)*100).toFixed(2) }}% <span class="muted">\xB1&nbsp;{{ (e.get_relative_lift_confidence_delta(i)*100).toFixed(2) }}</span></div>
+							<div><small>{{ (e.get_relative_effect(i)[0]*100).toFixed(2) }}% [<span class="text-muted" v-for="(ci,i) in e.get_relative_effect(i)[1]"><span v-if="i>0">,</span>{{(ci*100).toFixed(2)}}</span>]</small></div>
 						</span>
 					</td>
 					<td v-if="i > 0">
 						{{e.is_significant() ? 'Yes' : 'No' }}<br />
-						<span class="muted">{{ Math.round(e.get_certainty()) }}%</span>
+						<small><span class="text-muted">{{ Math.round(e.get_certainty()) }}%</span></small>
 					</td>
 				</tr>
 			</tbody>
@@ -169,16 +182,16 @@ Vue.component('experiment-table', {
 	methods: {
 		ci_scale: function(i) {
 			if (this.can_do_ci(i)) {
-				return Math.max(Math.abs(this.e.get_relative_lift(i) + this.e.get_relative_lift_confidence_delta(i)), Math.abs(this.e.get_relative_lift(i) - this.e.get_relative_lift_confidence_delta(i)));
+				return Math.max(this.e.get_relative_effect(i)[1].reduce(function(a,b){return Math.max(Math.abs(a),Math.abs(b))}));
 			} else if (this.can_do_mle(i)) {
-				if (this.e.get_relative_lift(i) == 0) return 1;
-				return Math.abs(this.e.get_relative_lift(i));
+				if (this.e.get_relative_effect(i)[0] == 0) return 1;
+				return Math.abs(this.e.get_relative_effect(i)[0]);
 			} else {
 				return undefined;
 			}
 		},
 		ci: function(i) {
-			return [this.e.get_relative_lift(i) - this.e.get_relative_lift_confidence_delta(i), this.e.get_relative_lift(i) + this.e.get_relative_lift_confidence_delta(i)];
+			return this.e.get_relative_effect(i)[1];
 		},
 		transpose: function(scale, value) {
 			return (scale + value) / (scale*2) * this.ci_width;
@@ -187,7 +200,7 @@ Vue.component('experiment-table', {
 			return !isNaN(this.ci(i)[0]) && !isNaN(this.ci(i)[1]);
 		},
 		can_do_mle: function(i) {
-			return !isNaN(this.e.get_relative_lift(i)) && isFinite(this.e.get_relative_lift(i));
+			return !isNaN(this.e.get_relative_effect(i)[0]) && isFinite(this.e.get_relative_effect(i)[0]);
 		},
 	},
 });
