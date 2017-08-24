@@ -8,7 +8,7 @@ var Experiment = function(id) {
     this.days = 0;
     
 	this.P_VALUE = 0.1;
-	this.GTEST_CUTOFF = chisqrdistr(1, this.P_VALUE);
+	this.GTEST_CUTOFF = jStat.chisquare.inv((1-this.P_VALUE), 1);
     
     this.assign_variant = function() {
         if (!this.active) return 0;
@@ -40,16 +40,16 @@ var Experiment = function(id) {
     };
     
     this.get_p = function() {
-        return chisqrprob(this.variants - 1, this.get_g_test());
+	    return (1-jStat.chisquare.cdf(this.get_g_test(), this.variants - 1));
     };
 
     this.get_certainty = function() {
-        return round_to_precision( 100 * (1-this.get_p()), 2);
+        return (100 * (1-this.get_p())).toFixed(2);
     };
 
     this.get_mean = function(i) {
     	var p = this.conversions[i]/this.visits[i];
-        var q = 1.644854 * Math.sqrt( p * ( 1 - p ) / this.visits[i] );
+        var q = jStat.studentt.inv(1-this.P_VALUE/2,10000000) * Math.sqrt( p * ( 1 - p ) / this.visits[i] );
         
         return [p, [p - q, p + q]];
     }
@@ -57,7 +57,7 @@ var Experiment = function(id) {
     this.get_absolute_effect = function(i) {
     	var p = this.get_conversion(i);
         var q = this.get_conversion(0);
-        var z = 1.644854 * Math.sqrt( (p * ( 1 - p ) / this.visits[i]) + q * ( 1 - q ) / this.visits[0] );
+        var z = jStat.studentt.inv(1-this.P_VALUE/2,10000000) * Math.sqrt( (p * ( 1 - p ) / this.visits[i]) + q * ( 1 - q ) / this.visits[0] );
         
         return [ p - q, [p - q - z, p - q + z]];
     }
@@ -71,7 +71,7 @@ var Experiment = function(id) {
 		var obs_var = this.visits[i];
 		var stdev_var = Math.sqrt(avg_var * ( 1 - avg_var )) / Math.sqrt(obs_var);
 
-		var zscore = tdistr(1000000, this.P_VALUE/2);
+		var zscore = jStat.studentt.inv(1-this.P_VALUE/2,1000000);
 		if (isNaN(avg_base) || isNaN(avg_var) || avg_base == 0 || obs_base == 0 || obs_var == 0) return [ NaN, [NaN, NaN]];
 		
 		var estimate = (avg_var - avg_base) / Math.abs(avg_base);
@@ -143,16 +143,16 @@ Vue.component('experiment-table', {
 					<th>Sales</th>
 					<th>Rate</th>
 					<th>Change</th>
-					<th>Significant</th>
+					<th>Sig.</th>
 				</tr>
 			</thead>
 			<tbody>
 				<tr v-for="(v,i) in e.variants">
 					<th v-if="i == 0">Base</th>
-					<th v-if="i > 0">Variant {{i}}</th>
-					<td>{{ e.visits[i].toLocaleString() }}</td>
-					<td>{{ e.conversions[i].toLocaleString() }}</td>
-					<td>{{ (e.get_mean(i)[0]*100).toFixed(2) }}%</td>
+					<th v-if="i > 0">Var {{i}}</th>
+					<td width="90">{{ e.visits[i].toLocaleString() }}</td>
+					<td width="90">{{ e.conversions[i].toLocaleString() }}</td>
+					<td width="90">{{ (e.get_mean(i)[0]*100).toFixed(2) }}%</td>
 					<td v-if="i == 0" class="text-muted">-</td>
 					<td v-if="i == 0" class="text-muted">-</td>
 					<td v-if="i > 0">
@@ -177,12 +177,13 @@ Vue.component('experiment-table', {
 	`,
 	props: {
 		e:				{},
-		ci_width:		{ type: Number, default: 100 }
+		ci_width:		{ type: Number, default: 140 },
+		ci_scale_min:	{ type: Number, default: 0 },
 	},
 	methods: {
 		ci_scale: function(i) {
 			if (this.can_do_ci(i)) {
-				return Math.max(this.e.get_relative_effect(i)[1].reduce(function(a,b){return Math.max(Math.abs(a),Math.abs(b))}));
+				return Math.max(this.ci_scale_min, this.e.get_relative_effect(i)[1].reduce(function(a,b){return Math.max(Math.abs(a),Math.abs(b))}));
 			} else if (this.can_do_mle(i)) {
 				if (this.e.get_relative_effect(i)[0] == 0) return 1;
 				return Math.abs(this.e.get_relative_effect(i)[0]);
